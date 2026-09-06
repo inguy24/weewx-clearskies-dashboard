@@ -5,13 +5,17 @@
 //   Snow section (only when snow > 0): snowflake icon + snow today + snow rate.
 //
 // Per ADR-042: dashboard has zero unit knowledge.
-//   rain/rainRate/snow/snowRate use ConvertedValue.formatted verbatim.
+//   Rain Today is calculated from archive records and formatted with the
+//   configured rain unit; rainRate/snow/snowRate use ConvertedValue.formatted.
 //
 // DataBag pattern (T0B.2): card self-extracts from dataBag["/api/v1/current"].
 // onRetry removed — page container manages data freshness in the DataBag model.
 
 import { useTranslation } from 'react-i18next';
 import { asConverted } from '../api/types';
+import { getStationDate } from '../utils/station-clock';
+import { useArchive, useStation, useTodayStats } from '../hooks/useWeatherData';
+import { formatValue } from '../utils/format';
 import {
   Card,
   CardHeader,
@@ -147,10 +151,35 @@ function PrecipitationCardContent({
   loading = false,
   error = null,
 }: Omit<PrecipitationCardProps, 'onRetry'>) {
-  const { t } = useTranslation('now');
+  const { t, i18n } = useTranslation('now');
+
+  // Keep this card self-contained: its daily total comes from the archive,
+  // never from another card or the latest one-minute archive record.
+  const { data: station } = useStation();
+  const archiveStart24h = observation
+    ? new Date(new Date(observation.timestamp).getTime() - 24 * 60 * 60 * 1000).toISOString()
+    : undefined;
+  const {
+    data: precipitationArchive,
+    stationClock,
+    loading: archiveLoading,
+    error: archiveError,
+  } = useArchive(
+    { from: archiveStart24h, fields: 'rain' },
+    { skip: archiveStart24h === undefined },
+  );
+  const stationDate = stationClock ? getStationDate({ stationClock }) : undefined;
+  const precipitationStats = useTodayStats(
+    observation,
+    precipitationArchive,
+    stationDate,
+    station?.timezone,
+  );
 
   const rainCV = asConverted(observation?.rain ?? null);
-  const rainFormatted = rainCV?.formatted ?? '—';
+  const rainFormatted = precipitationStats
+    ? formatValue(precipitationStats.rainSoFar, 'rain', i18n.language)
+    : '—';
 
   const rainRateCV = asConverted(observation?.rainRate ?? null);
   const rainRateFormatted = rainRateCV?.formatted ?? '—';
@@ -176,18 +205,18 @@ function PrecipitationCardContent({
   const snowRateLabel = snowRateCV?.label ?? units?.snowRate ?? '';
 
   return (
-    <Card footprint="tile" aria-busy={loading}>
+    <Card footprint="tile" aria-busy={loading || archiveLoading}>
       <CardHeader>
         <CardTitle as="h2">{t('precipitationCard.title')}</CardTitle>
       </CardHeader>
 
       <CardContent className="justify-center">
-        {loading ? (
+        {loading || archiveLoading ? (
           <>
             <span className="sr-only" role="status">{t('loading.precipitation')}</span>
             <PrecipitationSkeleton />
           </>
-        ) : error ? (
+        ) : error || archiveError ? (
           <p
             role="alert"
             className="text-muted-foreground"
